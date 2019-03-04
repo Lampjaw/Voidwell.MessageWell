@@ -8,7 +8,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
-var addr = flag.String("addr", ":80", "http service address")
+var addr = flag.String("addr", ":5000", "http service address")
 
 func main() {
 	flag.Parse()

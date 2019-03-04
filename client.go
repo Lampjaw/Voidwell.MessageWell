@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -42,6 +44,11 @@ type Client struct {
 	send chan []byte
 }
 
+type ReceiveMessage struct {
+	Action string   `json:"action"`
+	Events []string `json:"events"`
+}
+
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -51,12 +58,26 @@ func (c *Client) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, _, err := c.conn.ReadMessage()
+		_, msgBytes, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("ws receive error: %v", err)
 			}
 			break
+		}
+
+		var message ReceiveMessage
+		err2 := json.Unmarshal(msgBytes, &message)
+		if err2 != nil {
+			c.send <- []byte(fmt.Sprintf("SUBSCRIPTION ERROR: %v", err2))
+			continue
+		}
+
+		switch message.Action {
+		case "subscribe":
+			c.addSubscriptions(message.Events)
+		case "unsubscribe":
+			c.removeSubscriptions(message.Events)
 		}
 	}
 }
@@ -100,6 +121,18 @@ func (c *Client) writePump() {
 	}
 }
 
+func (c *Client) addSubscriptions(subKeys []string) {
+	if subKeys != nil {
+		c.hub.subscribe <- newSubscriptionChange(c, subKeys)
+	}
+}
+
+func (c *Client) removeSubscriptions(subKeys []string) {
+	if subKeys != nil {
+		c.hub.unsubscribe <- newSubscriptionChange(c, subKeys)
+	}
+}
+
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	upgrader.CheckOrigin = func(req *http.Request) bool {
 		return true
@@ -114,7 +147,13 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	key := vars["key"]
 
-	client.hub.register <- newRegistration(key, client)
+	client.hub.register <- client
+
+	if key != "" {
+		subKeys := make([]string, 1)
+		subKeys[0] = key
+		client.addSubscriptions(subKeys)
+	}
 
 	go client.writePump()
 	go client.readPump()
@@ -130,5 +169,5 @@ func publishWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	key := vars["key"]
 
-	hub.broadcast <- newMessage(key, bodyBytes)
+	hub.broadcast <- newBroadcastMessage(key, bodyBytes)
 }
